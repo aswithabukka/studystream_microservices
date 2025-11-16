@@ -1,0 +1,206 @@
+version: '3.9'
+
+services:
+  # ====================================
+  # Infrastructure Services
+  # ====================================
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: studystream-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_MULTIPLE_DATABASES: auth_db,user_db,task_db,notification_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/create-multiple-postgresql-databases.sh:/docker-entrypoint-initdb.d/create-multiple-postgresql-databases.sh
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - studystream-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: studystream-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - studystream-network
+
+  # ====================================
+  # Microservices
+  # ====================================
+
+  auth_service:
+    build:
+      context: ../services/auth_service
+      dockerfile: Dockerfile
+    container_name: studystream-auth
+    environment:
+      - ENVIRONMENT=development
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/auth_db
+      - REDIS_URL=redis://redis:6379/0
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-dev-secret-key-change-in-production-min-32-characters}
+      - JWT_ALGORITHM=HS256
+      - JWT_EXPIRATION_MINUTES=60
+    ports:
+      - "8001:8001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - studystream-network
+    restart: unless-stopped
+
+  user_service:
+    build:
+      context: ../services/user_service
+      dockerfile: Dockerfile
+    container_name: studystream-user
+    environment:
+      - ENVIRONMENT=development
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/user_db
+      - REDIS_URL=redis://redis:6379/1
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-dev-secret-key-change-in-production-min-32-characters}
+      - JWT_ALGORITHM=HS256
+      - AUTH_SERVICE_URL=http://auth_service:8001
+      - CACHE_TTL_SECONDS=300
+    ports:
+      - "8002:8002"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      auth_service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - studystream-network
+    restart: unless-stopped
+
+  task_service:
+    build:
+      context: ../services/task_service
+      dockerfile: Dockerfile
+    container_name: studystream-task
+    environment:
+      - ENVIRONMENT=development
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/task_db
+      - REDIS_URL=redis://redis:6379/2
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-dev-secret-key-change-in-production-min-32-characters}
+      - JWT_ALGORITHM=HS256
+      - AUTH_SERVICE_URL=http://auth_service:8001
+      - NOTIFICATION_SERVICE_URL=http://notification_service:8004
+    ports:
+      - "8003:8003"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      auth_service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - studystream-network
+    restart: unless-stopped
+
+  notification_service:
+    build:
+      context: ../services/notification_service
+      dockerfile: Dockerfile
+    container_name: studystream-notification
+    environment:
+      - ENVIRONMENT=development
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/notification_db
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-dev-secret-key-change-in-production-min-32-characters}
+      - JWT_ALGORITHM=HS256
+      - EMAIL_ENABLED=false
+      - SMTP_HOST=
+      - SMTP_PORT=
+    ports:
+      - "8004:8004"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - studystream-network
+    restart: unless-stopped
+
+  # ====================================
+  # API Gateway
+  # ====================================
+
+  gateway:
+    image: nginx:alpine
+    container_name: studystream-gateway
+    ports:
+      - "80:80"
+    volumes:
+      - ../gateway/nginx-simplified.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - auth_service
+      - user_service
+      - task_service
+      - notification_service
+    networks:
+      - studystream-network
+    restart: unless-stopped
+
+# ====================================
+# Networks
+# ====================================
+
+networks:
+  studystream-network:
+    driver: bridge
+    name: studystream-network
+
+# ====================================
+# Volumes
+# ====================================
+
+volumes:
+  postgres_data:
+    name: studystream-postgres-data
+  redis_data:
+    name: studystream-redis-data
